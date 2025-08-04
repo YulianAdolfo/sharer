@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Transmisión de Pantalla y Audio con PeerJS</title>
+  <style>
+    :root { --radius: 16px; --shadow: 0 12px 36px rgba(0,0,0,0.08); font-family: system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif; }
+    *{box-sizing:border-box}
+    body{margin:0;background:#0f172a;color:#f1f5fe;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:1rem;gap:1rem;}
+    .card{background:#1e2a4f;border-radius:16px;box-shadow:var(--shadow);padding:1rem;max-width:1000px;width:100%;display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
+    h1{margin-top:0;font-size:1.5rem;}
+    .btn{cursor:pointer;border:none;padding:0.75rem 1.25rem;border-radius:12px;font-weight:600;display:inline-flex;align-items:center;gap:0.5rem;transition:all .2s;}
+    .btn-primary{background:linear-gradient(135deg,#7c3aed,#6366f1);color:#fff;}
+    .btn-secondary{background:#272f5f;color:#fff;}
+    .btn-danger{background:#f87171;color:#fff;}
+    .status{background:#0f172a;border:1px solid rgba(255,255,255,0.08);padding:0.5rem 0.75rem;border-radius:10px;display:inline-block;font-size:0.85rem;}
+    .video-grid{display:flex;gap:1rem;flex-wrap:wrap;}
+    video{border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,0.2);background:#000;max-width:100%;}
+    .controls{display:flex;gap:.75rem;flex-wrap:wrap;}
+    .info{font-size:0.8rem;margin-top:4px;}
+    .pill{background:#2b366f;padding:4px 12px;border-radius:999px;font-size:0.75rem;display:inline-block;}
+    .hidden{display:none;}
+    .connection-box{display:flex;gap:1rem;flex-direction:column;}
+    .label{font-weight:600;margin-bottom:4px;}
+    .small-card{background:#1b265d;border-radius:12px;padding:8px;}
+	.on-focus{display:block;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:1200px;height:100vh;z-index:100;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div style="display:flex;flex-direction:column;gap:0.75rem;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <h1>Transmisión pantalla + audio</h1>
+          <div class="status" id="global-status">Inicializando...</div>
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+          <button class="btn btn-primary" id="send-button">📤 Enviar transmisión</button>
+          <button class="btn btn-secondary" id="receive-button">📥 Solicitar recibir</button>
+          <button class="btn btn-danger" id="reset-device">🔄 Resetear dispositivo</button>
+        </div>
+      </div>
+      <div class="connection-box">
+        <div class="small-card">
+          <div class="label">Tipo de dispositivo:</div>
+          <div id="device-type">(no definido)</div>
+        </div>
+        <div class="small-card">
+          <div class="label">ID propio (Peer):</div>
+          <div id="own-id">—</div>
+        </div>
+        <div class="small-card">
+          <div class="label">ID objetivo:</div>
+          <div id="target-id">—</div>
+        </div>
+        <div class="small-card">
+          <div class="label">Estado de conexión:</div>
+          <div id="connection-detail">Esperando servidores...</div>
+        </div>
+      </div>
+      <div class="info" id="extra-info">Usa los botones para iniciar o solicitar transmisión. El receptor debe haber cargado la página y tener su tipo de dispositivo definido.</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1rem;">
+      <div class="video-grid">
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
+          <div class="label">Vista previa local (lo que se envía):</div>
+          <video id="local-video" autoplay muted playsinline style="height:180px;"></video>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
+          <div class="label">Transmisión remota (recibida):</div>
+          <video id="remote-video" autoplay playsinline style="height:180px;"></video>
+        </div>
+      </div>
+      <div class="info"><span class="pill">Nota:</span> Si el otro extremo no responde al "Solicitar recibir", pídele que presione "Enviar transmisión".</div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+  <script>
+    // --- configuración original adaptada ---
+    const API_KEY = '$2a$10$Q7DJHOg94P.05Ys5efXsgOYcGR42EHFiJeDWxjCpgDYww2les.i0u';
+    const id_device_one = '682a9ed08960c979a59c8b00';
+    const id_device_second = '682a9efd8a456b7966a0cbaf';
+    const SEARCHING_SERVERS = 'Buscando servidores...';
+    const UPDATED = 'Identificador actualizado';
+    const WRONG = 'Algo salió mal';
+
+    // DOM
+    const sendButton = document.getElementById('send-button');
+    const receiveButton = document.getElementById('receive-button');
+    const resetDevice = document.getElementById('reset-device');
+    const remoteVideo = document.getElementById('remote-video');
+    const localVideo = document.getElementById('local-video');
+    const globalStatus = document.getElementById('global-status');
+    const ownIdEl = document.getElementById('own-id');
+    const targetIdEl = document.getElementById('target-id');
+    const deviceTypeEl = document.getElementById('device-type');
+    const connectionDetail = document.getElementById('connection-detail');
+
+    let peer = null;
+    let AUDIO_STREAM = null;
+    let COMBINED_STREAM = null;
+    let ID_TO_CALL = null;
+    let ID_connection = '';
+    let server_connection_list = '';
+    let type_of_device = '';
+
+    // Inicializar tipo de dispositivo desde localStorage or prompt simple
+    function setDeviceType(type) {
+      type_of_device = type;
+      localStorage.setItem('type-of-device', type);
+      deviceTypeEl.innerText = type === 'device_one' ? 'Padre (device_one)' : 'Madre (device_second)';
+    }
+    // Si no está, preguntar de forma simple (puedes reemplazar con tu UI existente)
+    if (!['device_one','device_second'].includes(localStorage.getItem('type-of-device'))) {
+      const choice = confirm('¿Eres el dispositivo padre? OK = Padre, Cancelar = Madre');
+      setDeviceType(choice ? 'device_one' : 'device_second');
+    } else {
+      type_of_device = localStorage.getItem('type-of-device');
+      deviceTypeEl.innerText = type_of_device === 'device_one' ? 'Padre (device_one)' : 'Madre (device_second)';
+    }
+
+    // obtener audio local (micrófono)
+    async function initAudio() {
+      try {
+        const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+        AUDIO_STREAM = mic;
+        updateGlobalStatus('Micrófono obtenido');
+      } catch (err) {
+        console.error('No se pudo obtener audio', err);
+        updateGlobalStatus('Error micrófono');
+      }
+    }
+    initAudio();
+
+    // obtener pantalla + audio y combinar
+    async function getCombinedScreenAndAudio() {
+      try {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }).catch(() =>
+          navigator.mediaDevices.getDisplayMedia({ video: true })
+        );
+        const combined = new MediaStream();
+        screenStream.getVideoTracks().forEach(t => combined.addTrack(t));
+        const hasSystemAudio = screenStream.getAudioTracks().length > 0;
+        if (!hasSystemAudio && AUDIO_STREAM) {
+          AUDIO_STREAM.getAudioTracks().forEach(t => combined.addTrack(t));
+        } else if (hasSystemAudio) {
+          screenStream.getAudioTracks().forEach(t => combined.addTrack(t));
+        }
+        COMBINED_STREAM = combined;
+        localVideo.srcObject = COMBINED_STREAM;
+        await localVideo.play().catch(() => {});
+        updateGlobalStatus('Preparado stream combinado');
+      } catch (e) {
+        console.error('Error combinando pantalla y audio', e);
+        updateGlobalStatus('Error captura pantalla');
+        throw e;
+      }
+    }
+
+    async function fetchServers() {
+      try {
+        const res = await fetch('https://servers-gamma.vercel.app/');
+        return await res.json();
+      } catch (e) {
+        console.warn('No se pudo obtener servidores STUN/TURN', e);
+        return [];
+      }
+    }
+
+    async function startPeer() {
+      connectionDetail.innerText = SEARCHING_SERVERS;
+      server_connection_list = await fetchServers();
+      connectionDetail.innerText = 'Servidores cargados';
+      peer = new Peer({ config: { iceServers: server_connection_list } });
+
+      peer.on('open', async (id) => {
+        ID_connection = id;
+        ownIdEl.innerText = id;
+        connectionDetail.innerText = 'Conectado a PeerJS';
+        updateGlobalStatus('Dispositivo listo: ' + id);
+        // enviar ID a jsonbin
+        if (type_of_device === 'device_one') {
+          await storeID(id, id_device_one, 'PUT');
+        } else {
+          await storeID(id, id_device_second, 'PUT');
+        }
+      });
+
+      peer.on('call', (call) => {
+        // recibe transmisión entrante
+        updateGlobalStatus('Recibiendo transmisión...');
+        call.answer(AUDIO_STREAM || undefined); // responde con mic si hay
+        call.on('stream', (remoteStream) => {
+          remoteVideo.srcObject = remoteStream;
+          remoteVideo.play().catch(()=>{});
+          updateGlobalStatus('Transmisión entrante activa');
+        });
+        call.on('close', () => {
+          updateGlobalStatus('Transmisión cerrada por remoto');
+        });
+        call.on('error', (e) => {
+          console.error('Error en recepción', e);
+          updateGlobalStatus('Error en transmisión entrante');
+        });
+      });
+
+      peer.on('error', (e) => {
+        console.error('Peer error', e);
+        updateGlobalStatus('Error PeerJS');
+      });
+    }
+
+    async function storeID(id, deviceBin, method) {
+      try {
+        const res = await fetch('https://api.jsonbin.io/v3/b/' + deviceBin, {
+          method,
+          headers: { 'Content-Type': 'application/json', 'X-Master-Key': API_KEY },
+          body: JSON.stringify({ id })
+        });
+        const json = await res.json();
+        if (json.metadata?.parentId) {
+          connectionDetail.innerText = UPDATED;
+        }
+      } catch (e) {
+        console.warn('No se pudo guardar ID', e);
+      }
+    }
+
+    async function getRemoteID() {
+      try {
+        const remoteBin = type_of_device === 'device_one' ? id_device_second : id_device_one;
+        const res = await fetch('https://api.jsonbin.io/v3/b/' + remoteBin, { headers: { 'Content-Type': 'application/json', 'X-Master-Key': API_KEY } });
+        const json = await res.json();
+        ID_TO_CALL = json?.record?.id || json?.record?.id; // redundancia segura
+        targetIdEl.innerText = ID_TO_CALL || 'no disponible';
+        return ID_TO_CALL;
+      } catch (e) {
+        console.error('Error obteniendo ID remoto', e);
+        return null;
+      }
+    }
+
+    // actualiza estado visual
+    function updateGlobalStatus(msg) {
+      globalStatus.innerText = msg;
+    }
+
+    // eventos botones
+    sendButton.addEventListener('click', async () => {
+      if (!peer) { updateGlobalStatus('Peer no inicializado aún'); return; }
+      try {
+        await getCombinedScreenAndAudio();
+        const target = await getRemoteID();
+        if (!target) { updateGlobalStatus('ID remoto no encontrado'); return; }
+        const conn = peer.connect(target);
+        conn.on('open', () => { conn.send('Iniciando transmisión'); });
+        const call = peer.call(target, COMBINED_STREAM);
+        call.on('stream', (remoteStream) => {
+          // opcional: mostrar si remoto responde con su stream
+          remoteVideo.srcObject = remoteStream;
+          remoteVideo.play().catch(()=>{});
+          updateGlobalStatus('Transmisión bidireccional activa');
+        });
+        call.on('close', () => { updateGlobalStatus('Transmisión saliente cerrada'); });
+        call.on('error', (e) => { console.error(e); updateGlobalStatus('Error en transmisión saliente'); });
+        updateGlobalStatus('Transmitiendo pantalla + audio');
+      } catch (e) {
+        updateGlobalStatus('Fallo al preparar transmisión');
+      }
+    });
+
+    receiveButton.addEventListener('click', async () => {
+      if (!peer) return;
+      const target = await getRemoteID();
+      if (!target) { updateGlobalStatus('No se encontró ID remoto'); return; }
+      const conn = peer.connect(target);
+      conn.on('open', () => {
+        conn.send('Solicito transmisión');
+        updateGlobalStatus('Solicitud enviada al remoto');
+      });
+      conn.on('data', d => console.log('Respuesta data:', d));
+    });
+
+    resetDevice.addEventListener('click', () => {
+      localStorage.removeItem('type-of-device');
+      location.reload();
+    });
+	remoteVideo.addEventListener('click', ()=> {
+		console.log(remoteVideo);
+		remoteVideo.style.height = '100vh'
+		remoteVideo.classList.add('on-focus');
+		document.documentElement.requestFullscreen();
+	})
+    // arranque
+    startPeer();
+  </script>
+</body>
+</html>
